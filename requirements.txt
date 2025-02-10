@@ -1,0 +1,7 @@
+jupyter
+ipywidgets
+numpy
+random
+seaborn
+pandas
+matplotlib
