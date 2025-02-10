@@ -10,7 +10,7 @@
 # Customer transactions take place every day, and every night the reserve accounts need to be non-negative.  
 # Surplus banks lend to deficit banks as requested to meet the overnight non-negative reserve requirement.  
 
-# In[42]:
+# In[75]:
 
 
 # import packages
@@ -26,7 +26,7 @@ import random
 rng = np.random.default_rng()
 
 
-# In[43]:
+# In[76]:
 
 
 # set parameters
@@ -44,12 +44,14 @@ premium_basis = .01 # basis for risk premium
 broker_network_fraction = 1 # TODO isnʻt working as intended. fraction of banks that can be "reached" by a broker 
 max_balance = 100 # upper limit for initial retail deposits
 max_loan_mult = 10 * max_balance # no bank should can take more than 10x its initial deposits in loans
+ZERO_THRESHOLD = 0.01  # Amounts below this are considered zero
+MINIMUM_LOAN = max_balance * 0.01    # Don't bother with loans smaller than this
 more_verbose = False
 
 
 # Updates: We have added a risk assessment and pricing component to the intrabank lending model. `update_net_positions` updates a risk assessment factor for each bank based on how they are positioned with respect to their reserve requirements. `get_lender_quote` is called for every lender to obtain a priced proposition for a loan to the bank in question based on the risk assessment. 
 
-# In[44]:
+# In[77]:
 
 
 # define utility functions
@@ -73,7 +75,7 @@ def get_lender_quote(lender, borrower, reserves, net_positions, risk_appetites, 
     adjusted_premium = risk_premium * (1 - risk_appetites[lender])
 
     # calculate with an arbitrary upper bound of max_rate_mult * cb_rate
-    quote = min(cb_rate + adjusted_premium, max_rate_mult * cb_rate)
+    quote = round(min(cb_rate + adjusted_premium, max_rate_mult * cb_rate), 4)
 
     # maybe_display(f"Lender {lender} has a risk appetite of {risk_appetites[lender]}")
     # maybe_display(f"Borrower {borrower} has a net position of {net_positions[borrower]}")
@@ -132,7 +134,7 @@ def update_net_positions(N, loans, rates, reserves, customers, banks, balances):
         
          # Calculate net position as a ratio to required reserves
         if required_reserves > 0:  # Avoid division by zero
-            net_position = (reserves[B] - loan_principal - interest_cost - required_reserves) / required_reserves
+            net_position = round((reserves[B] - loan_principal - interest_cost - required_reserves) / required_reserves, 4)
         else:
             net_position = 0 # TODO not sure about conditions with no required reserves
         
@@ -168,7 +170,9 @@ def retail_transactions(tau, customers, banks, balances, reserves):
     originating_banks = [banks[o] for o in originators]
     receiving_banks = [banks[r] for r in recipients]
     for t in range(transfers):
-        amount = percentages[t] * balances[originators[t]]
+        amount = round(percentages[t] * balances[originators[t]], 2)
+        if amount < MINIMUM_LOAN:
+            continue # skip transactions that are too small to bother with
         balances[recipients[t]] += amount
         balances[originators[t]] -= amount
         reserves[receiving_banks[t]] += amount
@@ -194,6 +198,16 @@ def settle_deficits(N, reserves, loans, rates, lenders, net_positions, risk_appe
     broker_reach = int(N * broker_network_fraction)
 
     for i in deficit_banks:
+        # just zero out sub-threshold reserves. weʻll have a leap second some day...
+        if abs(reserves[i]) < ZERO_THRESHOLD:
+            reserves[i] = 0
+            continue
+
+        # just zero out sub-MINIMUM_LOAN reserves. weʻll have a leap second some day...    
+        if abs(reserves[i]) < MINIMUM_LOAN:
+            reserves[i] = 0
+            continue
+        
         if len(possible_lenders) >= broker_reach:
             selected_lenders = random.sample(possible_lenders, broker_reach)
         else:
@@ -218,18 +232,20 @@ def settle_deficits(N, reserves, loans, rates, lenders, net_positions, risk_appe
                 quoted_rate = lowest_quotes_first[j][1]
                 if reserves[lender] >= abs(reserves[i]):
                     reserves[lender] += reserves[i]
+                    reserves[lender] = round(reserves[lender], 2)
                     maybe_display(f"Writing full loan to borrower {i} from lender {lender} for amount {abs(reserves[i])} at rate {quoted_rate}")
-                    loans[i].append(abs(reserves[i]))
+                    loans[i].append(round(abs(reserves[i]), 2))
                     rates[i].append(quoted_rate)
                     lenders[i].append(lender)
                     reserves[i] = 0
                     maybe_display(f"Lender {lender} has {reserves[lender]} reserves remaining. Borrower {i} has {reserves[i]} reserves remaining.")
                 elif reserves[lender] > 0:
                     maybe_display(f"Writing partial loan to borrower {i} from lender {lender} for amount {reserves[lender]} at rate {quoted_rate}")
-                    loans[i].append(reserves[lender])
+                    loans[i].append(round(reserves[lender], 2))
                     rates[i].append(quoted_rate)
                     lenders[i].append(lender)
                     reserves[i] += reserves[lender]
+                    reserves[i] = round(reserves[i], 2)
                     reserves[lender] = 0
                     maybe_display(f"Lender {lender} has {reserves[lender]} reserves remaining. Borrower {i} has {reserves[i]} reserves remaining.")                    
                     j += 1
@@ -256,7 +272,7 @@ def settle_deficits(N, reserves, loans, rates, lenders, net_positions, risk_appe
                     reserves[lender] += loan * (1 + rate)  # Repay with interest
 
             # now reset the bank
-            recap_amount = max_balance * bailout_deficit_multiplier
+            recap_amount = round(max_balance * bailout_deficit_multiplier, 0)
             display(f"Borrower {i_bad} needs a bailout of {recap_amount}")
             loans[i_bad] = [recap_amount] # REPLACE the loans, donʻt append. Fed ensures all outstanding debt is repaid.
             rates[i_bad] = [backstop_rate]
@@ -288,7 +304,7 @@ def repay_loans(N, loans, rates, lenders, reserves):
     return(loans, rates, lenders, reserves)
 
 
-# In[45]:
+# In[78]:
 
 
 # initialise data structures
@@ -331,7 +347,8 @@ financial_system_history['fed_recapitalization'] = [None] # 0 to many banks can 
 
 for s in range(1, steps+1):
 
-    maybe_display(f"Step {s}")
+    if s % 100 == 0:
+        display(f"Step {s}")
     
     #repay overnight loans
     loans, rates, lenders, reserves = repay_loans(N, loans, rates, lenders, reserves)
@@ -377,7 +394,7 @@ for s in range(1, steps+1):
 # 2) interest rates
 # 2) reserve account balances for each bank over time.
 
-# In[46]:
+# In[79]:
 
 
 # For the customer balances plot
@@ -457,7 +474,7 @@ plt.show()
 
 # These plots show the distribution of customer bank balances at the beginning of the simuation and the mean values at the end of the simulation steps.
 
-# In[47]:
+# In[80]:
 
 
 customer_history[customer_history['step'] == 0].hist('balance', bins = 100, grid=False)
@@ -470,7 +487,7 @@ plt.title('mean balances')
 sns.despine(left = True, bottom = True)
 
 
-# In[48]:
+# In[81]:
 
 
 display(financial_system_history)
@@ -478,7 +495,7 @@ display(financial_system_history)
 
 # This final plot shows, for each bank, mean reserve and loan values.
 
-# In[49]:
+# In[82]:
 
 
 bank_means = bank_history[['id', 'reserves', 'loans']].groupby(by='id').mean()
@@ -492,7 +509,7 @@ sns.despine(left = True, bottom = True)
 
 # Letʻs see if we can discern what is happening with an animated plot
 
-# In[50]:
+# In[83]:
 
 
 bank_history_output = widgets.Output()
